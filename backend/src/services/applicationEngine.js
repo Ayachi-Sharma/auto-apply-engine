@@ -1,10 +1,14 @@
 import { chromium } from "playwright";
+import { randomUUID } from "crypto";
+
 import { detectATS } from "./atsDetector.js";
 import { mapFieldToProfile, getMissingFields } from "./fieldMapper.js";
 import { LeverAdapter } from "../adapters/leverAdapter.js";
+import { ApplicationRun } from "../models/applicationRun.js";
 
 export async function apply(jobUrl, profile, resumePath) {
   let browser;
+  let run;
 
   try {
     // 1. Detect ATS
@@ -12,25 +16,43 @@ export async function apply(jobUrl, profile, resumePath) {
 
     console.log(`Detected ATS: ${ats}`);
 
-    // 2. Start browser
+    // 2. Create persistent application run
+    const runId = randomUUID();
+
+    run = await ApplicationRun.create({
+      runId,
+      jobUrl,
+      ats,
+      status: "RUNNING",
+      answers: {},
+      resumePath: resumePath || null,
+    });
+
+    console.log(`Created application run: ${runId}`);
+
+    // 3. Start browser
     browser = await chromium.launch({
       headless: false,
     });
 
     const page = await browser.newPage();
 
-    // 3. Create ATS adapter
+    // 4. Create ATS adapter
     const adapter = createAdapter(ats, page);
 
-    // 4. Open application
+    // 5. Open application
     await adapter.openApplication(jobUrl);
 
-    // 5. Read application fields
+    // 6. Read application fields
     const fields = await adapter.getFields();
 
     console.log(`Found ${fields.length} fields`);
 
-    // 6. Fill fields that can be confidently mapped
+    // Save discovered fields
+    run.fields = fields;
+    await run.save();
+
+    // 7. Fill fields that can be confidently mapped
     for (const field of fields) {
       if (field.name === "resume") {
         continue;
@@ -50,12 +72,12 @@ export async function apply(jobUrl, profile, resumePath) {
       }
     }
 
-    // 7. Upload resume
+    // 8. Upload resume
     if (resumePath) {
       await adapter.uploadResume(resumePath);
     }
 
-    // 8. Find fields that still need user input
+    // 9. Find fields that still need user input
     const missingFields = getMissingFields(fields, profile);
 
     if (missingFields.length > 0) {
@@ -63,28 +85,56 @@ export async function apply(jobUrl, profile, resumePath) {
         `⚠️ ${missingFields.length} fields require user input`
       );
 
+      run.status = "NEEDS_INPUT";
+      run.missingFields = missingFields;
+
+      await run.save();
+
       return {
         status: "NEEDS_INPUT",
+        runId,
         questions: missingFields,
       };
     }
 
     // Submission will be implemented next.
+    run.status = "FAILED";
+    run.failure = {
+      reason: "Submission flow not implemented yet",
+      step: "submission",
+    };
+
+    await run.save();
+
     return {
-      status: "READY",
+      status: "FAILED",
+      reason: "Submission flow not implemented yet",
+      step: "submission",
     };
   } catch (error) {
     console.error("Application failed:", error);
+
+    if (run) {
+      run.status = "FAILED";
+      run.failure = {
+        reason: error.message,
+        step: "application",
+      };
+
+      await run.save();
+    }
 
     return {
       status: "FAILED",
       reason: error.message,
       step: "application",
     };
+  } finally {
+    if (browser) {
+      await browser.close();
+      console.log("Browser closed");
+    }
   }
-
-  // Don't close the browser yet.
-  // We need the page to remain open for the pause/resume flow.
 }
 
 function createAdapter(ats, page) {

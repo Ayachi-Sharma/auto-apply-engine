@@ -1,3 +1,7 @@
+import "dotenv/config";
+import { connectDatabase } from "./config/database.js";
+import mongoose from "mongoose";
+
 import { apply } from "./services/applicationEngine.js";
 
 const jobUrl =
@@ -30,6 +34,8 @@ const profile = {
   ],
 };
 
+await connectDatabase();
+
 const result = await apply(
   jobUrl,
   profile,
@@ -38,3 +44,6 @@ const result = await apply(
 
 console.log("\n========== APPLY RESULT ==========\n");
 console.log(JSON.stringify(result, null, 2));
+
+await mongoose.disconnect();
+console.log("\n✅ Database disconnected");
