@@ -39,6 +39,11 @@ const applicationRunSchema = new mongoose.Schema(
       required: true,
     },
 
+    profile: {
+    type: mongoose.Schema.Types.Mixed,
+    required: true,
+    },
+
     ats: {
       type: String,
       required: true,
@@ -105,8 +110,8 @@ const applicationRunSchema = new mongoose.Schema(
     },
 
     recordingPath: {
-      type: String,
-      default: null,
+      type: [String],
+      default: [],
     },
   },
   {

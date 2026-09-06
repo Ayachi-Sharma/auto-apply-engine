@@ -256,27 +256,59 @@ async fillField(field, value) {
   }
 
   if (field.type === "select") {
-    await locator.selectOption({ label: value });
+    try {
+      await locator.selectOption({
+        value: String(value),
+      });
+    } catch (error) {
+      await locator.selectOption({
+        label: String(value),
+      });
+    }
+
     return;
   }
 
   if (field.type === "radio") {
-    await locator
-      .locator(`xpath=..`)
-      .getByText(value, { exact: true })
-      .click();
+    const radio = this.page.locator(
+      `[name="${field.name}"][value="${String(value)}"]`
+    );
+
+    await radio.check({ force: true });
+
     return;
   }
 
   if (field.type === "checkbox") {
-    await locator
-      .locator(`xpath=..`)
-      .getByText(value, { exact: true })
-      .click();
-    return;
+  const values = Array.isArray(value) ? value : [value];
+
+  for (const option of values) {
+    const checkbox = this.page.locator(
+      `[name="${field.name}"][value="${String(option)}"]`
+    );
+
+    if (field.name === "pronouns") {
+      await checkbox
+        .locator("xpath=..")
+        .getByText(String(option), { exact: true })
+        .click();
+
+      continue;
+    }
+
+    const isChecked = await checkbox.isChecked().catch(() => false);
+
+    if (isChecked) {
+      continue;
+    }
+
+    await checkbox.check({ force: true });
   }
 
-  await locator.fill(value);
+  return;
+}
+
+  await locator.fill(String(value));
 }
 
 async uploadResume(filePath) {
