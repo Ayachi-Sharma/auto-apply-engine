@@ -9,26 +9,26 @@ const jobUrl =
 
 const profile = {
   personalInfo: {
-    fullName: "Ayachi Sharma",
-    email: "ayachi@example.com",
-    phone: "+91-9876543210",
-    address: "Jaipur, Rajasthan",
+    fullName: "Archi Sharma",
+    email: "archi@example.com",
+    phone: "+91-9832432106",
+    address: "Raipur, Rajasthan",
     profiles: [
       {
         platform: "LinkedIn",
-        url: "https://linkedin.com/in/ayachi",
+        url: "https://linkedin.com/in/archi",
       },
       {
         platform: "Github",
-        url: "https://github.com/ayachi",
+        url: "https://github.com/archi",
       },
     ],
   },
 
   experience: [
     {
-      company: "Tech Company",
-      title: "Software Developer",
+      company: "Self Employed",
+      title: "Remote",
       current: true,
     },
   ],

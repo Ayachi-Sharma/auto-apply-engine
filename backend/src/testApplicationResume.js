@@ -3,41 +3,77 @@ import mongoose from "mongoose";
 
 import { connectDatabase } from "./config/database.js";
 import { apply_resume } from "./services/applicationEngine.js";
+// import { connectDB, disconnectDB } from "./config/database.js";
 
-const runId = "952e9b26-8ea0-43dc-b30b-05287436f529";
+async function run() {
+  // await connectDatabase();
 
-const answers = {
-  pronouns: "Use name only",
+  // Paste the latest runId from testApplicationEngine.js here
+  const runId = "9b479a62-37e5-42dd-a007-a3da02c6fc23";
 
-  "eeo[gender]": "Decline to self-identify",
+  // Formats today's date as MM/DD/YYYY
+  const today = new Date();
+  const todayFormatted = `${String(today.getMonth() + 1).padStart(2, "0")}/${String(
+    today.getDate()
+  ).padStart(2, "0")}/${today.getFullYear()}`;
 
-  "eeo[race]": "Decline to self-identify",
+  const answers = {
+    pronouns: ["Use name only"],
+    "eeo[gender]": "Decline to self-identify",
+    "eeo[race]": "Decline to self-identify",
+    "eeo[veteran]": "Decline to self-identify",
+    "eeo[disability]": "I do not want to answer ",
+    "eeo[disabilitySignature]": "Archi Sharma",
+    "eeo[disabilitySignatureDate]": todayFormatted, // Dynamically today's date
+    "surveysResponses[8dfb36ea-fd79-4bea-aa2d-734a7b290c35][responses][field0]": "21-29",
+    "surveysResponses[8dfb36ea-fd79-4bea-aa2d-734a7b290c35][responses][field1]": "Male",
+    "surveysResponses[8dfb36ea-fd79-4bea-aa2d-734a7b290c35][responses][field2]": ["White / Caucasian"],
+  };
 
-  "eeo[veteran]": "Decline to self-identify",
+  await connectDatabase();
+  const result = await apply_resume(runId, answers);
 
-  "eeo[disability]": "I do not want to answer ",
+  console.log("\n========== RESUME RESULT ==========\n");
+  console.log(JSON.stringify(result, null, 2));
 
-  "eeo[disabilitySignature]": "Ayachi Sharma",
+  await mongoose.disconnect();
 
-  "eeo[disabilitySignatureDate]": "09/05/2026",
+}
 
-  "surveysResponses[8dfb36ea-fd79-4bea-aa2d-734a7b290c35][responses][field0]":
-    "21-29",
+run();
 
-  "surveysResponses[8dfb36ea-fd79-4bea-aa2d-734a7b290c35][responses][field1]":
-    "Female",
+// import "dotenv/config";
+// import mongoose from "mongoose";
 
-  "surveysResponses[8dfb36ea-fd79-4bea-aa2d-734a7b290c35][responses][field2]":
-    ["Asian"],
-};
+// import { connectDatabase } from "./config/database.js";
+// import { apply_resume } from "./services/applicationEngine.js";
 
-await connectDatabase();
+// const runId = "b446f9f1-fc96-4cb8-b096-33df466dc162";
 
-const result = await apply_resume(runId, answers);
+// // Helper to get today's date in MM/DD/YYYY format
+// const today = new Date();
+// const todayFormatted = `${String(today.getMonth() + 1).padStart(2, '0')}/${String(today.getDate()).padStart(2, '0')}/${today.getFullYear()}`;
 
-console.log("\n========== RESUME RESULT ==========\n");
-console.log(JSON.stringify(result, null, 2));
+// const answers = {
+//   "pronouns": ["Use name only"],
+//   "eeo[gender]": "Decline to self-identify",
+//   "eeo[race]": "Decline to self-identify",
+//   "eeo[veteran]": "Decline to self-identify",
+//   "eeo[disability]": "I do not want to answer ",
+//   "eeo[disabilitySignature]": "Ayachi Sharma",
+//   "eeo[disabilitySignatureDate]": todayFormatted, // Must be today's date, NOT 2026
+//   "surveysResponses[8dfb36ea-fd79-4bea-aa2d-734a7b290c35][responses][field0]": "21-29",
+//   "surveysResponses[8dfb36ea-fd79-4bea-aa2d-734a7b290c35][responses][field1]": "Female",
+//   "surveysResponses[8dfb36ea-fd79-4bea-aa2d-734a7b290c35][responses][field2]": ["Asian"]
+// };
 
-await mongoose.disconnect();
+// await connectDatabase();
 
-console.log("\n✅ Database disconnected");
+// const result = await apply_resume(runId, answers);
+
+// console.log("\n========== RESUME RESULT ==========\n");
+// console.log(JSON.stringify(result, null, 2));
+
+// await mongoose.disconnect();
+
+// console.log("\n✅ Database disconnected");

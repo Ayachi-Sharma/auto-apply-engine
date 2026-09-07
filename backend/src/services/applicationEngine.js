@@ -1,146 +1,145 @@
-import { chromium } from "playwright";
+﻿import { chromium } from "playwright-extra";
+import stealthPlugin from "puppeteer-extra-plugin-stealth";
 import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 
 import { detectATS } from "./atsDetector.js";
-import {
-  mapFieldToProfile,
-  getMissingFields,
-} from "./fieldMapper.js";
+import { mapFieldToProfile, getMissingFields } from "./fieldMapper.js";
 
 import { LeverAdapter } from "../adapters/leverAdapter.js";
+import { GreenhouseAdapter } from "../adapters/greenhouseAdapter.js";
+import { AshbyAdapter } from "../adapters/ashbyAdapter.js";
+import { WorkableAdapter } from "../adapters/workableAdapter.js";
 import { ApplicationRun } from "../models/applicationRun.js";
+import * as notifier from "./notifier.js";
 
+// ─── Stealth ─────────────────────────────────────────────────────────────────
+chromium.use(stealthPlugin());
+
+// ─── Named steps (used in failure reporting) ─────────────────────────────────
+export const STEPS = {
+  OPEN_APPLICATION: "open_application",
+  EXTRACT_FIELDS:   "extract_fields",
+  FILL_FIELDS:      "fill_fields",
+  UPLOAD_RESUME:    "upload_resume",
+  WAIT_FOR_INPUT:   "wait_for_input",
+  FILL_ANSWERS:     "fill_answers",
+  SUBMIT:           "submit",
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function createAdapter(ats, page) {
   switch (ats) {
-    case "lever":
-      return new LeverAdapter(page);
-
-    default:
-      throw new Error(`Adapter not implemented yet: ${ats}`);
+    case "lever":      return new LeverAdapter(page);
+    case "greenhouse": return new GreenhouseAdapter(page);
+    case "ashby":      return new AshbyAdapter(page);
+    case "workable":   return new WorkableAdapter(page);
+    default:           throw new Error(`Adapter not implemented: ${ats}`);
   }
 }
 
-async function recordTrace(run, page, runId, data) {
-  const screenshotDir = path.resolve(
-    process.cwd(),
-    "screenshots",
-    runId
-  );
-
-  fs.mkdirSync(screenshotDir, {
-    recursive: true,
+async function createBrowserContext() {
+  const browser = await chromium.launch({
+    headless: false,
+    ignoreDefaultArgs: ["--enable-automation"],
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-infobars",
+      "--window-size=1280,900",
+    ],
   });
+
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 850 },
+    locale: "en-US",
+    timezoneId: "Asia/Kolkata",
+  });
+
+  return { browser, context };
+}
+
+async function recordTrace(run, page, runId, data) {
+  const screenshotDir = path.resolve(process.cwd(), "screenshots", runId);
+  fs.mkdirSync(screenshotDir, { recursive: true });
 
   const safeFieldName = data.field
-    .replace(/[^a-zA-Z0-9_-]/g, "_")
-    .slice(0, 80);
+    ? data.field.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80)
+    : "action";
 
   const screenshotName = `${Date.now()}-${safeFieldName}.png`;
+  const screenshotPath = path.join(screenshotDir, screenshotName);
 
-  const screenshotPath = path.join(
-    screenshotDir,
-    screenshotName
-  );
+  try {
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+  } catch {
+    console.warn(`Screenshot skipped for ${safeFieldName}: page is navigating.`);
+  }
 
-  await page.screenshot({
-    path: screenshotPath,
-    fullPage: true,
-  });
-
-  const traceEntry = {
-    ...data,
-    screenshot: screenshotPath,
-    timestamp: new Date().toISOString(),
-  };
-
-  run.trace.push(traceEntry);
-
+  run.trace.push({ ...data, screenshot: screenshotPath, timestamp: new Date().toISOString() });
   await run.save();
 }
 
-export async function apply(jobUrl, profile, resumePath) {
-  let browser;
-  let context;
-  let run;
-  let tracingStarted = false;
-  let tracePath;
+// ─── Core engine functions ────────────────────────────────────────────────────
+
+/**
+ * Run the browser session for an existing ApplicationRun (status=RUNNING).
+ * Called by the API route after creating the record, or by apply() below.
+ */
+export async function applyRun(runId) {
+  let browser, context, run;
+  let currentStep = STEPS.OPEN_APPLICATION;
 
   try {
-    const ats = detectATS(jobUrl);
-    const runId = randomUUID();
+    run = await ApplicationRun.findOne({ runId });
+    if (!run) throw new Error(`Application run not found: ${runId}`);
 
-    tracePath = path.resolve(
-      process.cwd(),
-      "recordings",
-      `${runId}.zip`
-    );
+    const { jobUrl, profile, resumePath, ats } = run;
 
-    fs.mkdirSync(path.dirname(tracePath), {
-      recursive: true,
+    notifier.emit(runId, {
+      type: "PROGRESS",
+      step: STEPS.OPEN_APPLICATION,
+      message: `Opening ${ats} application...`,
     });
 
-    run = await ApplicationRun.create({
-      runId,
-      jobUrl,
-      ats,
-      profile,
-      status: "RUNNING",
-      answers: {},
-      resumePath,
-      trace: [],
-      recordingPath: tracePath,
-    });
-
-    console.log(`Starting application run: ${runId}`);
-    console.log(`ATS detected: ${ats}`);
-
-    browser = await chromium.launch({
-      headless: false,
-    });
-
-    context = await browser.newContext();
-
-    await context.tracing.start({
-      screenshots: true,
-      snapshots: true,
-      sources: true,
-    });
-
-    tracingStarted = true;
-
+    ({ browser, context } = await createBrowserContext());
     const page = await context.newPage();
-
     const adapter = createAdapter(ats, page);
 
     await adapter.openApplication(jobUrl);
+    notifier.emit(runId, {
+      type: "PROGRESS",
+      step: STEPS.OPEN_APPLICATION,
+      message: "Application opened",
+    });
 
+    // ── Extract fields ──────────────────────────────────────────────────────
+    currentStep = STEPS.EXTRACT_FIELDS;
     const fields = await adapter.getFields();
-
-    console.log(`Found ${fields.length} fields`);
+    notifier.emit(runId, {
+      type: "PROGRESS",
+      step: STEPS.EXTRACT_FIELDS,
+      message: `Found ${fields.length} fields`,
+    });
 
     run.fields = fields;
     await run.save();
 
-    // Fill fields that can be confidently mapped from the profile.
+    // ── Fill profile fields ─────────────────────────────────────────────────
+    currentStep = STEPS.FILL_FIELDS;
     for (const field of fields) {
-      if (field.name === "resume") {
-        continue;
-      }
-
+      if (field.name === "resume") continue;
       const mapping = mapFieldToProfile(field, profile);
-
-      if (
-        mapping.value !== null &&
-        mapping.value !== undefined
-      ) {
-        console.log(
-          `Filling ${field.name} → ${mapping.value}`
-        );
-
+      if (mapping.value !== null && mapping.value !== undefined) {
+        console.log(`Filling ${field.name} → ${mapping.value}`);
         await adapter.fillField(field, mapping.value);
-
+        notifier.emit(runId, {
+          type: "PROGRESS",
+          step: STEPS.FILL_FIELDS,
+          message: `Filled ${field.name}`,
+        });
         await recordTrace(run, page, runId, {
           action: "fill",
           field: field.name,
@@ -150,10 +149,15 @@ export async function apply(jobUrl, profile, resumePath) {
       }
     }
 
-    // Upload resume.
+    // ── Upload resume ───────────────────────────────────────────────────────
+    currentStep = STEPS.UPLOAD_RESUME;
     if (resumePath) {
       await adapter.uploadResume(resumePath);
-
+      notifier.emit(runId, {
+        type: "PROGRESS",
+        step: STEPS.UPLOAD_RESUME,
+        message: "Resume uploaded",
+      });
       await recordTrace(run, page, runId, {
         action: "upload_resume",
         field: "resume",
@@ -162,77 +166,71 @@ export async function apply(jobUrl, profile, resumePath) {
       });
     }
 
-    // Find fields that require user input.
+    // ── Check for missing fields ────────────────────────────────────────────
+    currentStep = STEPS.WAIT_FOR_INPUT;
     const missingFields = getMissingFields(fields, profile);
-
     run.missingFields = missingFields;
 
     if (missingFields.length > 0) {
       run.status = "NEEDS_INPUT";
       await run.save();
 
-      console.log(
-        `Application needs ${missingFields.length} user answers`
-      );
-
-      return {
-        status: "NEEDS_INPUT",
+      console.log(`Application needs ${missingFields.length} user answers`);
+      notifier.emit(runId, {
+        type: "NEEDS_INPUT",
         runId,
         questions: missingFields,
-      };
+      });
+
+      return { status: "NEEDS_INPUT", runId, questions: missingFields };
     }
 
-    // Submission is intentionally not implemented yet.
-    run.status = "FAILED";
-    run.failure = {
-      reason: "Submission flow not implemented yet",
-      step: "submit",
-    };
+    // ── Submit directly (no missing fields) ────────────────────────────────
+    currentStep = STEPS.SUBMIT;
+    console.log("Submitting application...");
+    const submissionResult = await adapter.submit();
 
+    await recordTrace(run, page, runId, {
+      action: "submit",
+      field: "application",
+      value: "submitted",
+      source: `${ats}Adapter.submit`,
+    });
+
+    console.log("Application submitted");
+
+    run.status = "SUBMITTED";
+    run.receipt = submissionResult.receipt;
+    run.confirmationText = submissionResult.confirmationText;
     await run.save();
 
-    return {
-      status: "FAILED",
+    notifier.emit(runId, {
+      type: "SUBMITTED",
       runId,
-      reason: "Submission flow not implemented yet",
-      step: "submit",
+      receipt: submissionResult.receipt,
+    });
+
+    return {
+      status: "SUBMITTED",
+      runId,
+      receipt: submissionResult.receipt,
+      confirmation_text: submissionResult.confirmationText,
     };
   } catch (error) {
     console.error("Application failed:", error);
-
     if (run) {
       run.status = "FAILED";
-      run.failure = {
-        reason: error.message,
-        step: "application",
-      };
-
+      run.failure = { reason: error.message, step: currentStep };
       await run.save();
     }
-
-    return {
-      status: "FAILED",
+    notifier.emit(runId, {
+      type: "FAILED",
+      runId,
       reason: error.message,
-      step: "application",
-    };
+      step: currentStep,
+    });
+    return { status: "FAILED", reason: error.message, step: currentStep };
   } finally {
-    if (context && tracingStarted) {
-      try {
-        await context.tracing.stop({
-          path: tracePath,
-        });
-
-        console.log(
-          `✅ Playwright trace saved: ${tracePath}`
-        );
-      } catch (error) {
-        console.error(
-          "❌ Failed to save Playwright trace:",
-          error.message
-        );
-      }
-    }
-
     if (browser) {
       await browser.close();
       console.log("Browser closed");
@@ -240,203 +238,121 @@ export async function apply(jobUrl, profile, resumePath) {
   }
 }
 
-export async function apply_resume(runId, answers) {
-  let browser;
-  let context;
-  let run;
-  let tracingStarted = false;
-  let tracePath;
+/**
+ * Resume a NEEDS_INPUT run after the user has provided answers.
+ * Called by the API route, or by apply_resume() below.
+ */
+export async function resumeRun(runId, answers) {
+  let browser, context, run;
+  let currentStep = STEPS.OPEN_APPLICATION;
 
   try {
     run = await ApplicationRun.findOne({ runId });
 
     if (!run) {
-      return {
-        status: "FAILED",
-        reason: `Application run not found: ${runId}`,
-        step: "resume",
-      };
+      return { status: "FAILED", reason: `Run not found: ${runId}`, step: "resume" };
     }
-
     if (run.status !== "NEEDS_INPUT") {
       return {
         status: "FAILED",
-        reason: `Application run cannot be resumed from status: ${run.status}`,
+        reason: `Cannot resume from status: ${run.status}`,
         step: "resume",
       };
     }
 
     const missingAnswers = run.missingFields.filter(
-      (question) =>
-        answers[question.field] === undefined ||
-        answers[question.field] === null
+      (q) => answers[q.field] === undefined || answers[q.field] === null
     );
-
     if (missingAnswers.length > 0) {
-      return {
-        status: "NEEDS_INPUT",
-        runId,
-        questions: missingAnswers,
-      };
+      return { status: "NEEDS_INPUT", runId, questions: missingAnswers };
     }
 
-    tracePath = path.resolve(
-      process.cwd(),
-      "recordings",
-      `${runId}-resume-${Date.now()}.zip`
-    );
+    notifier.emit(runId, { type: "PROGRESS", step: STEPS.OPEN_APPLICATION, message: "Reopening application..." });
 
-    fs.mkdirSync(path.dirname(tracePath), {
-      recursive: true,
-    });
+    run.status = "RUNNING";
+    await run.save();
 
-    browser = await chromium.launch({
-      headless: false,
-    });
-
-    context = await browser.newContext();
-
-    await context.tracing.start({
-      screenshots: true,
-      snapshots: true,
-      sources: true,
-    });
-
-    tracingStarted = true;
-
+    ({ browser, context } = await createBrowserContext());
     const page = await context.newPage();
-
+    await page.bringToFront();
     const adapter = createAdapter(run.ats, page);
 
     await adapter.openApplication(run.jobUrl);
+    notifier.emit(runId, { type: "PROGRESS", step: STEPS.OPEN_APPLICATION, message: "Application reopened" });
 
+    // ── Re-extract fields ───────────────────────────────────────────────────
+    currentStep = STEPS.EXTRACT_FIELDS;
     const fields = await adapter.getFields();
+    notifier.emit(runId, { type: "PROGRESS", step: STEPS.EXTRACT_FIELDS, message: `Found ${fields.length} fields` });
 
-    console.log(`Found ${fields.length} fields on resume`);
-
-    // Refill profile fields.
+    // ── Refill profile fields ───────────────────────────────────────────────
+    currentStep = STEPS.FILL_FIELDS;
     for (const field of fields) {
-      if (field.name === "resume") {
-        continue;
-      }
-
+      if (field.name === "resume") continue;
       const mapping = mapFieldToProfile(field, run.profile);
-
-      if (
-        mapping.value !== null &&
-        mapping.value !== undefined
-      ) {
-        console.log(
-          `Filling ${field.name} → ${mapping.value}`
-        );
-
+      if (mapping.value !== null && mapping.value !== undefined) {
+        console.log(`Filling ${field.name} → ${mapping.value}`);
         await adapter.fillField(field, mapping.value);
-
-        await recordTrace(run, page, runId, {
-          action: "fill",
-          field: field.name,
-          value: mapping.value,
-          source: mapping.source,
-        });
-
-        console.log(
-          `✅ Refilled ${field.name} from ${mapping.source}`
-        );
+        notifier.emit(runId, { type: "PROGRESS", step: STEPS.FILL_FIELDS, message: `Filled ${field.name}` });
+        await recordTrace(run, page, runId, { action: "fill", field: field.name, value: mapping.value, source: mapping.source });
       }
     }
 
-    // Re-upload resume.
+    // ── Re-upload resume ────────────────────────────────────────────────────
+    currentStep = STEPS.UPLOAD_RESUME;
     if (run.resumePath) {
       await adapter.uploadResume(run.resumePath);
-
-      await recordTrace(run, page, runId, {
-        action: "upload_resume",
-        field: "resume",
-        value: run.resumePath,
-        source: "resumePath",
-      });
+      notifier.emit(runId, { type: "PROGRESS", step: STEPS.UPLOAD_RESUME, message: "Resume uploaded" });
+      await recordTrace(run, page, runId, { action: "upload_resume", field: "resume", value: run.resumePath, source: "resumePath" });
     }
 
-    // Fill all user-provided answers.
+    // ── Fill user answers ───────────────────────────────────────────────────
+    currentStep = STEPS.FILL_ANSWERS;
     for (const question of run.missingFields) {
       const answer = answers[question.field];
+      const field = fields.find((f) => f.name === question.field);
+      if (!field) throw new Error(`Field not found during resume: ${question.field}`);
 
-      const field = fields.find(
-        (item) => item.name === question.field
-      );
-
-      if (!field) {
-        throw new Error(
-          `Field not found during resume: ${question.field}`
-        );
-      }
-
-      console.log(
-        `Filling ${question.field} → ${answer}`
-      );
-
+      console.log(`Filling ${question.field} → ${JSON.stringify(answer)}`);
       await adapter.fillField(field, answer);
-
-      await recordTrace(run, page, runId, {
-        action: "fill",
-        field: question.field,
-        value: answer,
-        source: "user_answer",
-      });
-
-      console.log(
-        `✅ Filled ${question.field} from user answer`
-      );
+      notifier.emit(runId, { type: "PROGRESS", step: STEPS.FILL_ANSWERS, message: `Answered ${question.label}` });
+      await recordTrace(run, page, runId, { action: "fill", field: question.field, value: answer, source: "user_answer" });
     }
 
-    // Store the latest resume recording.
-    run.recordingPath = tracePath;
+    // ── Submit ──────────────────────────────────────────────────────────────
+    currentStep = STEPS.SUBMIT;
+    console.log("Submitting application...");
+    notifier.emit(runId, { type: "PROGRESS", step: STEPS.SUBMIT, message: "Submitting application..." });
+
+    const submissionResult = await adapter.submit();
+    await recordTrace(run, page, runId, { action: "submit", field: "application", value: "submitted", source: `${run.ats}Adapter.submit` });
+
+    console.log("Application submitted");
 
     run.answers = answers;
-    run.status = "RUNNING";
-
+    run.receipt = submissionResult.receipt;
+    run.confirmationText = submissionResult.confirmationText;
+    run.status = "SUBMITTED";
     await run.save();
 
+    notifier.emit(runId, { type: "SUBMITTED", runId, receipt: submissionResult.receipt });
+
     return {
-      status: "READY_FOR_SUBMISSION",
+      status: "SUBMITTED",
       runId,
+      receipt: submissionResult.receipt,
+      confirmation_text: submissionResult.confirmationText,
     };
   } catch (error) {
     console.error("Resume failed:", error);
-
     if (run) {
       run.status = "FAILED";
-      run.failure = {
-        reason: error.message,
-        step: "resume",
-      };
-
+      run.failure = { reason: error.message, step: currentStep };
       await run.save();
     }
-
-    return {
-      status: "FAILED",
-      reason: error.message,
-      step: "resume",
-    };
+    notifier.emit(runId, { type: "FAILED", runId, reason: error.message, step: currentStep });
+    return { status: "FAILED", reason: error.message, step: currentStep };
   } finally {
-    if (context && tracingStarted) {
-      try {
-        await context.tracing.stop({
-          path: tracePath,
-        });
-
-        console.log(
-          `✅ Playwright trace saved: ${tracePath}`
-        );
-      } catch (error) {
-        console.error(
-          "❌ Failed to save Playwright trace:",
-          error.message
-        );
-      }
-    }
-
     if (browser) {
       await browser.close();
       console.log("Browser closed");
@@ -444,283 +360,35 @@ export async function apply_resume(runId, answers) {
   }
 }
 
+// ─── Backward-compatible wrappers for test scripts ────────────────────────────
 
-// import { chromium } from "playwright";
-// import { randomUUID } from "crypto";
+/**
+ * Legacy entry point used by testApplicationEngine.js.
+ * Creates the DB record then calls applyRun().
+ */
+export async function apply(jobUrl, profile, resumePath) {
+  const ats = detectATS(jobUrl);
+  const runId = randomUUID();
 
-// import { detectATS } from "./atsDetector.js";
-// import { mapFieldToProfile, getMissingFields } from "./fieldMapper.js";
-// import { LeverAdapter } from "../adapters/leverAdapter.js";
-// import { ApplicationRun } from "../models/applicationRun.js";
+  await ApplicationRun.create({
+    runId,
+    jobUrl,
+    ats,
+    profile,
+    status: "RUNNING",
+    resumePath: resumePath || null,
+    trace: [],
+  });
 
-// export async function apply(jobUrl, profile, resumePath) {
-//   let browser;
-//   let run;
+  console.log(`Starting application run: ${runId}`);
+  console.log(`ATS detected: ${ats}`);
 
-//   try {
-//     // 1. Detect ATS
-//     const ats = detectATS(jobUrl);
+  return applyRun(runId);
+}
 
-//     console.log(`Detected ATS: ${ats}`);
-
-//     // 2. Create persistent application run
-//     const runId = randomUUID();
-
-//     run = await ApplicationRun.create({
-//       runId,
-//       jobUrl,
-//       ats,
-//       profile,
-//       status: "RUNNING",
-//       answers: {},
-//       resumePath: resumePath || null,
-//     });
-
-//     console.log(`Created application run: ${runId}`);
-
-//     // 3. Start browser
-//     browser = await chromium.launch({
-//       headless: false,
-//     });
-
-//     const page = await browser.newPage();
-
-//     // 4. Create ATS adapter
-//     const adapter = createAdapter(ats, page);
-
-//     // 5. Open application
-//     await adapter.openApplication(jobUrl);
-
-//     // 6. Read application fields
-//     const fields = await adapter.getFields();
-
-//     console.log(`Found ${fields.length} fields`);
-
-//     // Save discovered fields
-//     run.fields = fields;
-//     await run.save();
-
-//     // 7. Fill fields that can be confidently mapped
-//     for (const field of fields) {
-//       if (field.name === "resume") {
-//         continue;
-//       }
-
-//       const mapping = mapFieldToProfile(field, profile);
-
-//       if (
-//         mapping.value !== null &&
-//         mapping.value !== undefined
-//       ) {
-//         await adapter.fillField(field, mapping.value);
-
-//         console.log(
-//           `✅ Filled ${field.name} from ${mapping.source}`
-//         );
-//       }
-//     }
-
-//     // 8. Upload resume
-//     if (resumePath) {
-//       await adapter.uploadResume(resumePath);
-//     }
-
-//     // 9. Find fields that still need user input
-//     const missingFields = getMissingFields(fields, profile);
-
-//     if (missingFields.length > 0) {
-//       console.log(
-//         `⚠️ ${missingFields.length} fields require user input`
-//       );
-
-//       run.status = "NEEDS_INPUT";
-//       run.missingFields = missingFields;
-
-//       await run.save();
-
-//       return {
-//         status: "NEEDS_INPUT",
-//         runId,
-//         questions: missingFields,
-//       };
-//     }
-
-//     // Submission will be implemented next.
-//     run.status = "FAILED";
-//     run.failure = {
-//       reason: "Submission flow not implemented yet",
-//       step: "submission",
-//     };
-
-//     await run.save();
-
-//     return {
-//       status: "FAILED",
-//       reason: "Submission flow not implemented yet",
-//       step: "submission",
-//     };
-//   } catch (error) {
-//     console.error("Application failed:", error);
-
-//     if (run) {
-//       run.status = "FAILED";
-//       run.failure = {
-//         reason: error.message,
-//         step: "application",
-//       };
-
-//       await run.save();
-//     }
-
-//     return {
-//       status: "FAILED",
-//       reason: error.message,
-//       step: "application",
-//     };
-//   } finally {
-//     if (browser) {
-//       await browser.close();
-//       console.log("Browser closed");
-//     }
-//   }
-// }
-
-// export async function apply_resume(runId, answers) {
-//   let browser;
-
-//   try {
-//     // 1. Load the saved application run
-//     const run = await ApplicationRun.findOne({ runId });
-
-//     if (!run) {
-//       return {
-//         status: "FAILED",
-//         reason: `Application run not found: ${runId}`,
-//         step: "resume",
-//       };
-//     }
-
-//     if (run.status !== "NEEDS_INPUT") {
-//       return {
-//         status: "FAILED",
-//         reason: `Application run cannot be resumed from status: ${run.status}`,
-//         step: "resume",
-//       };
-//     }
-
-//     // 2. Validate that all required answers were provided
-//     const missingAnswers = run.missingFields.filter(
-//       (question) =>
-//         answers[question.field] === undefined ||
-//         answers[question.field] === null
-//     );
-
-//     if (missingAnswers.length > 0) {
-//       return {
-//         status: "NEEDS_INPUT",
-//         runId,
-//         questions: missingAnswers,
-//       };
-//     }
-
-//     // 3. Start a new browser session
-//     browser = await chromium.launch({
-//       headless: false,
-//     });
-
-//     const page = await browser.newPage();
-
-//     // 4. Recreate the ATS adapter
-//     const adapter = createAdapter(run.ats, page);
-
-//     // 5. Reopen the application
-//     await adapter.openApplication(run.jobUrl);
-
-//     // 6. Read the fields again
-//     const fields = await adapter.getFields();
-
-//     console.log(`Found ${fields.length} fields on resume`);
-
-//     // 7. Refill fields from the saved profile
-//     for (const field of fields) {
-//       if (field.name === "resume") {
-//         continue;
-//       }
-
-//       const mapping = mapFieldToProfile(field, run.profile);
-
-//       if (
-//         mapping.value !== null &&
-//         mapping.value !== undefined
-//       ) {
-//         await adapter.fillField(field, mapping.value);
-
-//         console.log(
-//           `✅ Refilled ${field.name} from ${mapping.source}`
-//         );
-//       }
-//     }
-
-//     // 8. Upload resume again
-//     if (run.resumePath) {
-//       await adapter.uploadResume(run.resumePath);
-//     }
-
-//     // 9. Fill the user's answers
-//     for (const question of run.missingFields) {
-//       const answer = answers[question.field];
-
-//       const field = fields.find(
-//         (item) => item.name === question.field
-//       );
-
-//       if (!field) {
-//         throw new Error(
-//           `Field not found during resume: ${question.field}`
-//         );
-//       }
-
-//       await adapter.fillField(field, answer);
-
-//       console.log(
-//         `✅ Filled ${question.field} from user answer`
-//       );
-//     }
-
-//     // 10. Save answers
-//     run.answers = answers;
-
-//     // For now we stop before submission.
-//     run.status = "RUNNING";
-
-//     await run.save();
-
-//     return {
-//       status: "READY_FOR_SUBMISSION",
-//       runId,
-//     };
-//   } catch (error) {
-//     console.error("Resume failed:", error);
-
-//     return {
-//       status: "FAILED",
-//       reason: error.message,
-//       step: "resume",
-//     };
-//   } finally {
-//     if (browser) {
-//       await browser.close();
-//       console.log("Browser closed");
-//     }
-//   }
-// }
-
-// function createAdapter(ats, page) {
-//   switch (ats) {
-//     case "lever":
-//       return new LeverAdapter(page);
-
-//     default:
-//       throw new Error(`No adapter implemented for ATS: ${ats}`);
-//   }
-// }
+/**
+ * Legacy entry point used by testApplicationResume.js.
+ */
+export async function apply_resume(runId, answers) {
+  return resumeRun(runId, answers);
+}

@@ -3,18 +3,18 @@ import { mapFieldToProfile, createInputQuestion,   getMissingFields,
 
 const profile = {
   personalInfo: {
-    fullName: "Ayachi Sharma",
-    email: "ayachi@example.com",
+    fullName: "Archi Sharma",
+    email: "archi@example.com",
     phone: "+91-9876543210",
     address: "Jaipur, Rajasthan",
     profiles: [
       {
         platform: "LinkedIn",
-        url: "https://linkedin.com/in/ayachi",
+        url: "https://linkedin.com/in/archi",
       },
       {
         platform: "Github",
-        url: "https://github.com/ayachi",
+        url: "https://github.com/archi",
       },
     ],
   },
