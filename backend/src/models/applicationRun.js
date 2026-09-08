@@ -47,7 +47,7 @@ const applicationRunSchema = new mongoose.Schema(
     ats: {
       type: String,
       required: true,
-      enum: ["lever", "greenhouse", "ashby", "workable"],
+      enum: ["lever", "ashby", "workable"],
     },
 
     status: {

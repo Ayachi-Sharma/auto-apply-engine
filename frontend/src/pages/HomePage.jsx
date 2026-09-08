@@ -89,7 +89,7 @@ export default function HomePage({ onStarted }) {
             <div className="form-section">
               <div className="section-title">?? Job URL</div>
               <div className="field">
-                <label htmlFor="jobUrl">Lever / Greenhouse / Ashby / Workable link</label>
+                <label htmlFor="jobUrl">Lever / Ashby / Workable link</label>
                 <input
                   id="jobUrl"
                   type="url"

@@ -13,13 +13,6 @@ export function detectATS(jobUrl) {
     return "lever";
   }
 
-  if (
-    hostname === "boards.greenhouse.io" ||
-    hostname === "job-boards.greenhouse.io"
-  ) {
-    return "greenhouse";
-  }
-
   if (hostname === "jobs.ashbyhq.com") {
     return "ashby";
   }

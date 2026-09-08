@@ -8,7 +8,6 @@ import { detectATS } from "./atsDetector.js";
 import { mapFieldToProfile, getMissingFields } from "./fieldMapper.js";
 
 import { LeverAdapter } from "../adapters/leverAdapter.js";
-import { GreenhouseAdapter } from "../adapters/greenhouseAdapter.js";
 import { AshbyAdapter } from "../adapters/ashbyAdapter.js";
 import { WorkableAdapter } from "../adapters/workableAdapter.js";
 import { ApplicationRun } from "../models/applicationRun.js";
@@ -77,7 +76,6 @@ export function buildFilledPreview(fields, receipt, trace = []) {
 function createAdapter(ats, page) {
   switch (ats) {
     case "lever":      return new LeverAdapter(page);
-    case "greenhouse": return new GreenhouseAdapter(page);
     case "ashby":      return new AshbyAdapter(page);
     case "workable":   return new WorkableAdapter(page);
     default:           throw new Error(`Adapter not implemented: ${ats}`);
