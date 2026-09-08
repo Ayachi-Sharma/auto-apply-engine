@@ -53,7 +53,7 @@ const applicationRunSchema = new mongoose.Schema(
     status: {
       type: String,
       required: true,
-      enum: ["RUNNING", "NEEDS_INPUT", "SUBMITTED", "FAILED"],
+      enum: ["RUNNING", "NEEDS_INPUT", "FILLED", "SUBMITTED", "FAILED"],
       default: "RUNNING",
     },
 

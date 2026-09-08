@@ -6,7 +6,7 @@ import fs from "fs";
 
 import { detectATS } from "../services/atsDetector.js";
 import { ApplicationRun } from "../models/applicationRun.js";
-import { applyRun, resumeRun } from "../services/applicationEngine.js";
+import { applyRun, resumeRun, buildFilledPreview } from "../services/applicationEngine.js";
 import { subscribe, unsubscribe, emit } from "../services/notifier.js";
 
 const router = Router();
@@ -28,6 +28,18 @@ const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } });
 function buildStateEvent(run) {
   if (run.status === "NEEDS_INPUT") {
     return { type: "NEEDS_INPUT", runId: run.runId, questions: run.missingFields };
+  }
+  if (run.status === "RUNNING") {
+    return { type: "RUNNING", runId: run.runId, message: "Application is running..." };
+  }
+  if (run.status === "FILLED") {
+    return {
+      type: "FILLED",
+      runId: run.runId,
+      receipt: run.receipt,
+      confirmationText: run.confirmationText,
+      filledPreview: buildFilledPreview(run.fields, run.receipt, run.trace),
+    };
   }
   if (run.status === "SUBMITTED") {
     return { type: "SUBMITTED", runId: run.runId, receipt: run.receipt };
@@ -107,7 +119,10 @@ router.post("/applications/:runId/resume", async (req, res) => {
       });
     }
 
-    // Return 202 immediately so the client re-subscribes to SSE
+// Return 202 immediately so the client re-subscribes to SSE
+    // Update status to RUNNING synchronously so SSE replay shows progress, not the old NEEDS_INPUT
+    run.status = "RUNNING";
+    await run.save();
     res.status(202).json({ runId, status: "RUNNING" });
 
     // Background
@@ -134,6 +149,8 @@ router.get("/applications/:runId", async (req, res) => {
       jobUrl:        run.jobUrl,
       missingFields: run.missingFields,
       receipt:       run.receipt,
+      confirmationText: run.confirmationText,
+      filledPreview: buildFilledPreview(run.fields, run.receipt, run.trace),
       failure:       run.failure,
       createdAt:     run.createdAt,
       updatedAt:     run.updatedAt,
@@ -161,8 +178,8 @@ router.get("/applications/:runId/events", async (req, res) => {
     if (run) {
       res.write(`data: ${JSON.stringify(buildStateEvent(run))}\n\n`);
 
-      // If already in terminal state, close after replay
-      if (["SUBMITTED", "FAILED"].includes(run.status)) {
+        // If already in terminal state, close after replay
+      if (["FILLED", "SUBMITTED", "FAILED"].includes(run.status)) {
         res.end();
         return;
       }

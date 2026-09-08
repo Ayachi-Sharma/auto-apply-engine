@@ -28,10 +28,14 @@ export default function App() {
   const [receipt, setReceipt] = useState(null);
   const [failureInfo, setFailureInfo] = useState(null);
   const [liveEvents, setLiveEvents] = useState([]);
+  const [submissionType, setSubmissionType] = useState(null); // "submitted" | "filled"
+  const [filledPreview, setFilledPreview] = useState(null);
 
   function handleStarted(newRunId) {
     setRunId(newRunId);
     setLiveEvents([]);
+    setSubmissionType(null);
+    setFilledPreview(null);
     setView("running");
   }
 
@@ -40,8 +44,16 @@ export default function App() {
     if (event.type === "NEEDS_INPUT") {
       setQuestions(event.questions);
       setView("questions");
+    } else if (event.type === "FILLED" || event.type === "READY_TO_SUBMIT") {
+      // Application fully filled — automation stopped BEFORE clicking submit.
+      setReceipt(event.receipt);
+      setFilledPreview(event.filledPreview ?? null);
+      setSubmissionType("filled");
+      setView("submitted");
     } else if (event.type === "SUBMITTED") {
       setReceipt(event.receipt);
+      setFilledPreview(null);
+      setSubmissionType("submitted");
       setView("submitted");
     } else if (event.type === "FAILED") {
       setFailureInfo({ reason: event.reason, step: event.step });
@@ -56,11 +68,15 @@ export default function App() {
     setReceipt(null);
     setFailureInfo(null);
     setLiveEvents([]);
+    setSubmissionType(null);
+    setFilledPreview(null);
   }
 
   function handleAnswersSubmitted(newRunId) {
     setRunId(newRunId);
     setLiveEvents([]);
+    setSubmissionType(null);
+    setFilledPreview(null);
     setView("running");
   }
 
@@ -86,7 +102,12 @@ export default function App() {
         />
       )}
       {view === "submitted" && (
-        <SubmittedPage receipt={receipt} onReset={handleReset} />
+        <SubmittedPage
+          receipt={receipt}
+          filledPreview={filledPreview}
+          submissionType={submissionType}
+          onReset={handleReset}
+        />
       )}
       {view === "failed" && (
         <FailedPage failure={failureInfo} onReset={handleReset} />

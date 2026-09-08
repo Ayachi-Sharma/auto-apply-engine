@@ -9,7 +9,7 @@ const STEP_ICONS = {
   upload_resume:    "??",
   wait_for_input:   "?",
   fill_answers:     "??",
-  submit:           "??",
+  finalize:         "✅",
   default:          "?",
 };
 
@@ -32,7 +32,7 @@ export default function RunningPage({ runId, events, onEvent }) {
         const event = JSON.parse(e.data);
         onEvent(event);
         // Close SSE on terminal states
-        if (["SUBMITTED", "FAILED"].includes(event.type)) {
+        if (["NEEDS_INPUT", "READY_TO_SUBMIT", "SUBMITTED", "FAILED", "FILLED"].includes(event.type)) {
           es.close();
         }
       } catch {}
@@ -54,7 +54,7 @@ export default function RunningPage({ runId, events, onEvent }) {
 
   const progressEvents = events.filter((e) => e.type === "PROGRESS" || e.type === "RUNNING");
   const lastEvent = events[events.length - 1];
-  const isTerminal = lastEvent && ["NEEDS_INPUT", "SUBMITTED", "FAILED"].includes(lastEvent.type);
+  const isTerminal = lastEvent && ["NEEDS_INPUT", "READY_TO_SUBMIT", "SUBMITTED", "FAILED", "FILLED"].includes(lastEvent.type);
 
   return (
     <main>
@@ -64,7 +64,9 @@ export default function RunningPage({ runId, events, onEvent }) {
             <div className="status-dot running"></div>
             <div className="status-title">Application in progress</div>
             <div className="status-subtitle">
-              {isTerminal ? "Processing complete" : "Filling your application � this takes about 30�60 seconds"}
+              {lastEvent?.type === "READY_TO_SUBMIT"
+                ? "Development mode stopped before final submission"
+                : isTerminal ? "Processing complete" : "Filling your application - this takes about 30-60 seconds"}
             </div>
           </div>
 

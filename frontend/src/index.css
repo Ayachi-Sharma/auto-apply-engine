@@ -503,6 +503,45 @@ body {
 
 .receipt-key { color: var(--text-3); font-family: monospace; min-width: 140px; flex-shrink: 0; word-break: break-all; }
 .receipt-val { color: var(--text); word-break: break-all; }
+.filled-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.filled-form-field { display: flex; flex-direction: column; gap: 6px; }
+.filled-form-field label { color: var(--text-2); font-size: 0.82rem; font-weight: 500; }
+.filled-form-control {
+  width: 100%;
+  box-sizing: border-box;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.88rem;
+  padding: 10px 12px;
+  resize: vertical;
+}
+.filled-form-control:read-only { cursor: default; }
+.filled-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  color: var(--text);
+  font-size: 0.88rem;
+}
+.filled-choice-indicator {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  color: white;
+  background: rgba(255,255,255,0.03);
+}
+.filled-choice-indicator.checked { background: var(--primary); border-color: var(--primary); }
+@media (max-width: 640px) {
+  .filled-form-grid { grid-template-columns: 1fr; }
+}
 
 /* ─── Failed page ────────────────────────────────────────────────── */
 .failed-page { padding: 60px 0; text-align: center; }

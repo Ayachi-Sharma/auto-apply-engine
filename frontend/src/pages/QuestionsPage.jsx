@@ -142,22 +142,13 @@ export default function QuestionsPage({ runId, questions, onAnswersSubmitted, on
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ answers }),
       });
-      const data = await res.json();
+const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to submit answers");
 
-      // Go back to running view which will re-subscribe to SSE
+      // Transition to the running/progress page. The parent (App) will
+      // re-subscribe to SSE via RunningPage, which replays the current
+      // state (RUNNING) and streams live events until terminal.
       onAnswersSubmitted(runId);
-
-      // Also open a new SSE connection from the running page � 
-      // but we pass onEvent so the parent can transition on SUBMITTED/FAILED
-      const es = new EventSource(`${API}/applications/${runId}/events`);
-      es.onmessage = (ev) => {
-        try {
-          const event = JSON.parse(ev.data);
-          onEvent(event);
-          if (["SUBMITTED", "FAILED"].includes(event.type)) es.close();
-        } catch {}
-      };
     } catch (err) {
       setError(err.message);
       setSubmitting(false);

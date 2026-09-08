@@ -25,10 +25,55 @@ export const STEPS = {
   UPLOAD_RESUME:    "upload_resume",
   WAIT_FOR_INPUT:   "wait_for_input",
   FILL_ANSWERS:     "fill_answers",
-  SUBMIT:           "submit",
+  FINALIZE:         "finalize",
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Build a user-facing summary of every field that was filled in the form,
+ * pairing the extracted label (if any) with its current form value.
+ * This is what the frontend shows when the automation stops before submission.
+ */
+export function buildFilledPreview(fields, receipt, trace = []) {
+  const captured = { ...(receipt || {}) };
+  for (const event of trace || []) {
+    if (event.action === "fill" && event.field && event.value !== undefined) {
+      captured[event.field] = event.value;
+    }
+  }
+  const preview = [];
+  const representedKeys = new Set();
+
+  for (const field of fields || []) {
+    if (!field || !field.name) continue;
+    const receiptKey = [field.name, field.id, field.label]
+      .find((key) => key && captured[key] !== undefined && captured[key] !== null);
+    if (!receiptKey) continue;
+
+    preview.push({
+      name: field.name,
+      label: field.label || field.name,
+      type: field.type,
+      value: captured[receiptKey],
+    });
+    representedKeys.add(receiptKey);
+  }
+
+  // Keep adapter-captured values even when a dynamic ATS control was not
+  // present in the persisted field schema.
+  for (const [name, value] of Object.entries(captured)) {
+    if (representedKeys.has(name) || value === undefined || value === null) continue;
+    preview.push({
+      name,
+      label: name.replace(/[_-]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase()),
+      type: Array.isArray(value) ? "checkbox" : "text",
+      value,
+    });
+  }
+
+  return preview;
+}
 function createAdapter(ats, page) {
   switch (ats) {
     case "lever":      return new LeverAdapter(page);
@@ -73,7 +118,7 @@ async function recordTrace(run, page, runId, data) {
   const screenshotPath = path.join(screenshotDir, screenshotName);
 
   try {
-    await page.screenshot({ path: screenshotPath, fullPage: true });
+    await page.screenshot({ path: screenshotPath, fullPage: true, timeout: 10000 });
   } catch {
     console.warn(`Screenshot skipped for ${safeFieldName}: page is navigating.`);
   }
@@ -84,10 +129,6 @@ async function recordTrace(run, page, runId, data) {
 
 // ─── Core engine functions ────────────────────────────────────────────────────
 
-/**
- * Run the browser session for an existing ApplicationRun (status=RUNNING).
- * Called by the API route after creating the record, or by apply() below.
- */
 export async function applyRun(runId) {
   let browser, context, run;
   let currentStep = STEPS.OPEN_APPLICATION;
@@ -134,18 +175,29 @@ export async function applyRun(runId) {
       const mapping = mapFieldToProfile(field, profile);
       if (mapping.value !== null && mapping.value !== undefined) {
         console.log(`Filling ${field.name} → ${mapping.value}`);
-        await adapter.fillField(field, mapping.value);
-        notifier.emit(runId, {
-          type: "PROGRESS",
-          step: STEPS.FILL_FIELDS,
-          message: `Filled ${field.name}`,
-        });
-        await recordTrace(run, page, runId, {
-          action: "fill",
-          field: field.name,
-          value: mapping.value,
-          source: mapping.source,
-        });
+        try {
+          await adapter.fillField(field, mapping.value);
+          notifier.emit(runId, {
+            type: "PROGRESS",
+            step: STEPS.FILL_FIELDS,
+            message: `Filled ${field.name}`,
+          });
+          await recordTrace(run, page, runId, {
+            action: "fill",
+            field: field.name,
+            value: mapping.value,
+            source: mapping.source,
+          });
+        } catch (err) {
+          console.warn(`⚠️ Failed to fill ${field.name}: ${err.message} — continuing`);
+          await recordTrace(run, page, runId, {
+            action: "fill_error",
+            field: field.name,
+            value: mapping.value,
+            source: mapping.source,
+            error: err.message,
+          }).catch(() => {});
+        }
       }
     }
 
@@ -185,36 +237,66 @@ export async function applyRun(runId) {
       return { status: "NEEDS_INPUT", runId, questions: missingFields };
     }
 
-    // ── Submit directly (no missing fields) ────────────────────────────────
-    currentStep = STEPS.SUBMIT;
-    console.log("Submitting application...");
-    const submissionResult = await adapter.submit();
+    // ── Finalize — collect a receipt of what was filled in ───────────────────
+    // Submission is currently disabled: the automation stops immediately before
+    // clicking the "Submit Application" button and reports what was filled.
+    currentStep = STEPS.FINALIZE;
+    console.log("Finalizing filled application...");
+    notifier.emit(runId, {
+      type: "PROGRESS",
+      step: STEPS.FINALIZE,
+      message: "Collecting filled-application data...",
+    });
+
+    const finalizeResult = await adapter.submit();
 
     await recordTrace(run, page, runId, {
-      action: "submit",
+      action: "finalize",
       field: "application",
-      value: "submitted",
+      value: finalizeResult.submitted ? "submitted" : "filled",
       source: `${ats}Adapter.submit`,
     });
 
-    console.log("Application submitted");
+    run.receipt = finalizeResult.receipt;
+    run.confirmationText = finalizeResult.confirmationText;
 
+    if (finalizeResult.submitted === false) {
+      // Automation stopped before the real submission click.
+      run.status = "FILLED";
+      await run.save();
+
+      notifier.emit(runId, {
+        type: "FILLED",
+        runId,
+        receipt: finalizeResult.receipt,
+        confirmationText: finalizeResult.confirmationText,
+        filledPreview: buildFilledPreview(run.fields, finalizeResult.receipt, run.trace),
+      });
+
+      return {
+        status: "FILLED",
+        runId,
+        receipt: finalizeResult.receipt,
+        confirmationText: finalizeResult.confirmationText,
+        filledPreview: buildFilledPreview(run.fields, finalizeResult.receipt, run.trace),
+      };
+    }
+
+    console.log("Application submitted");
     run.status = "SUBMITTED";
-    run.receipt = submissionResult.receipt;
-    run.confirmationText = submissionResult.confirmationText;
     await run.save();
 
     notifier.emit(runId, {
       type: "SUBMITTED",
       runId,
-      receipt: submissionResult.receipt,
+      receipt: finalizeResult.receipt,
     });
 
     return {
       status: "SUBMITTED",
       runId,
-      receipt: submissionResult.receipt,
-      confirmation_text: submissionResult.confirmationText,
+      receipt: finalizeResult.receipt,
+      confirmation_text: finalizeResult.confirmationText,
     };
   } catch (error) {
     console.error("Application failed:", error);
@@ -238,10 +320,6 @@ export async function applyRun(runId) {
   }
 }
 
-/**
- * Resume a NEEDS_INPUT run after the user has provided answers.
- * Called by the API route, or by apply_resume() below.
- */
 export async function resumeRun(runId, answers) {
   let browser, context, run;
   let currentStep = STEPS.OPEN_APPLICATION;
@@ -292,9 +370,29 @@ export async function resumeRun(runId, answers) {
       const mapping = mapFieldToProfile(field, run.profile);
       if (mapping.value !== null && mapping.value !== undefined) {
         console.log(`Filling ${field.name} → ${mapping.value}`);
-        await adapter.fillField(field, mapping.value);
-        notifier.emit(runId, { type: "PROGRESS", step: STEPS.FILL_FIELDS, message: `Filled ${field.name}` });
-        await recordTrace(run, page, runId, { action: "fill", field: field.name, value: mapping.value, source: mapping.source });
+        try {
+          await adapter.fillField(field, mapping.value);
+          notifier.emit(runId, {
+            type: "PROGRESS",
+            step: STEPS.FILL_FIELDS,
+            message: `Filled ${field.name}`,
+          });
+          await recordTrace(run, page, runId, {
+            action: "fill",
+            field: field.name,
+            value: mapping.value,
+            source: mapping.source,
+          });
+        } catch (err) {
+          console.warn(`⚠️ Failed to fill ${field.name}: ${err.message} — continuing`);
+          await recordTrace(run, page, runId, {
+            action: "fill_error",
+            field: field.name,
+            value: mapping.value,
+            source: mapping.source,
+            error: err.message,
+          }).catch(() => {});
+        }
       }
     }
 
@@ -314,34 +412,87 @@ export async function resumeRun(runId, answers) {
       if (!field) throw new Error(`Field not found during resume: ${question.field}`);
 
       console.log(`Filling ${question.field} → ${JSON.stringify(answer)}`);
-      await adapter.fillField(field, answer);
-      notifier.emit(runId, { type: "PROGRESS", step: STEPS.FILL_ANSWERS, message: `Answered ${question.label}` });
-      await recordTrace(run, page, runId, { action: "fill", field: question.field, value: answer, source: "user_answer" });
+      try {
+        await adapter.fillField(field, answer);
+        notifier.emit(runId, {
+          type: "PROGRESS",
+          step: STEPS.FILL_ANSWERS,
+          message: `Answered ${question.label}`,
+        });
+        await recordTrace(run, page, runId, {
+          action: "fill",
+          field: question.field,
+          value: answer,
+          source: "user_answer",
+        });
+      } catch (err) {
+        console.warn(`⚠️ Failed to fill answer ${question.field}: ${err.message} — continuing`);
+        await recordTrace(run, page, runId, {
+          action: "fill_error",
+          field: question.field,
+          value: answer,
+          source: "user_answer",
+          error: err.message,
+        }).catch(() => {});
+      }
     }
 
-    // ── Submit ──────────────────────────────────────────────────────────────
-    currentStep = STEPS.SUBMIT;
-    console.log("Submitting application...");
-    notifier.emit(runId, { type: "PROGRESS", step: STEPS.SUBMIT, message: "Submitting application..." });
+    // ── Finalize — collect a receipt of what was filled in ───────────────────
+    // Submission is currently disabled: the automation stops immediately before
+    // clicking the "Submit Application" button and reports what was filled.
+    currentStep = STEPS.FINALIZE;
+    console.log("Finalizing filled application...");
+    notifier.emit(runId, {
+      type: "PROGRESS",
+      step: STEPS.FINALIZE,
+      message: "Collecting filled-application data...",
+    });
 
-    const submissionResult = await adapter.submit();
-    await recordTrace(run, page, runId, { action: "submit", field: "application", value: "submitted", source: `${run.ats}Adapter.submit` });
+    const finalizeResult = await adapter.submit();
+    await recordTrace(run, page, runId, {
+      action: "finalize",
+      field: "application",
+      value: finalizeResult.submitted ? "submitted" : "filled",
+      source: `${run.ats}Adapter.submit`,
+    });
+
+    run.answers = answers;
+    run.receipt = finalizeResult.receipt;
+    run.confirmationText = finalizeResult.confirmationText;
+
+    if (finalizeResult.submitted === false) {
+      run.status = "FILLED";
+      await run.save();
+
+      notifier.emit(runId, {
+        type: "FILLED",
+        runId,
+        receipt: finalizeResult.receipt,
+        confirmationText: finalizeResult.confirmationText,
+        filledPreview: buildFilledPreview(run.fields, finalizeResult.receipt, run.trace),
+      });
+
+      return {
+        status: "FILLED",
+        runId,
+        receipt: finalizeResult.receipt,
+        confirmationText: finalizeResult.confirmationText,
+        filledPreview: buildFilledPreview(run.fields, finalizeResult.receipt, run.trace),
+      };
+    }
 
     console.log("Application submitted");
 
-    run.answers = answers;
-    run.receipt = submissionResult.receipt;
-    run.confirmationText = submissionResult.confirmationText;
     run.status = "SUBMITTED";
     await run.save();
 
-    notifier.emit(runId, { type: "SUBMITTED", runId, receipt: submissionResult.receipt });
+    notifier.emit(runId, { type: "SUBMITTED", runId, receipt: finalizeResult.receipt });
 
     return {
       status: "SUBMITTED",
       runId,
-      receipt: submissionResult.receipt,
-      confirmation_text: submissionResult.confirmationText,
+      receipt: finalizeResult.receipt,
+      confirmation_text: finalizeResult.confirmationText,
     };
   } catch (error) {
     console.error("Resume failed:", error);
@@ -360,12 +511,6 @@ export async function resumeRun(runId, answers) {
   }
 }
 
-// ─── Backward-compatible wrappers for test scripts ────────────────────────────
-
-/**
- * Legacy entry point used by testApplicationEngine.js.
- * Creates the DB record then calls applyRun().
- */
 export async function apply(jobUrl, profile, resumePath) {
   const ats = detectATS(jobUrl);
   const runId = randomUUID();
@@ -386,9 +531,6 @@ export async function apply(jobUrl, profile, resumePath) {
   return applyRun(runId);
 }
 
-/**
- * Legacy entry point used by testApplicationResume.js.
- */
 export async function apply_resume(runId, answers) {
   return resumeRun(runId, answers);
 }
